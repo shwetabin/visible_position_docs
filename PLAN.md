@@ -193,8 +193,19 @@ Add `Position`/`PositionWithAffinity` overloads for the most-used navigation fun
 - [ ] `CharacterAfter(Position)` / `CharacterBefore(Position)` (if needed)
 - [ ] `EndOfDocument(Position)` returning `Position`
 - [ ] `IsStartOfDocument(Position)` / `IsEndOfDocument(Position)` returning `bool`
+- [ ] `PreviousPositionOf(Position, EditingBoundaryCrossingRule)` returning `Position` — implement via `PreviousVisuallyDistinctCandidate` directly, no `CreateVisiblePosition`
+- [ ] `NextPositionOf(Position, EditingBoundaryCrossingRule)` returning `Position` — existing `NextPositionOf(Position)` returns VP; add a `Position`-returning overload alongside it
 
-Each overload should be a separate CL with tests.
+Each overload should be a separate CL with tests. Priority order by usage frequency
+across commands:
+1. `IsStartOfParagraph(Position)` / `IsEndOfParagraph(Position)` — used in 9 files
+2. `StartOfParagraph(Position)` / `EndOfParagraph(Position)` — used in 7 files
+3. `PreviousPositionOf(Position)` / `NextPositionOf(Position)` — unblocks Phase 3 infrastructure
+4. `StartOfBlock(Position)` / `EndOfBlock(Position)` / `IsStartOfBlock(Position)` / `IsEndOfBlock(Position)`
+5. `InSameParagraph(Position, Position)`
+6. `StartOfNextParagraph(Position)`
+7. `EnclosingEmptyListItem(Position)` → `Node*`
+8. `CharacterAfter(Position)` / `EndOfDocument(Position)` / document boundary tests
 
 ### Task 2.2: Add Position Overloads for editing_commands_utilities [Person B - Weeks 3-4]
 
@@ -290,6 +301,12 @@ The `MoveParagraph`/`MoveParagraphs`/`MoveParagraphWithClones` methods are the h
 - [ ] Migrate internal logic to use Position (paragraph range computation, destination handling)
 - [ ] Update all callers (in `delete_selection_command.cc`, `indent_outdent_command.cc`, etc.)
 - [ ] Extensive testing - these are critical for cut/paste, indent/outdent, list operations
+
+CL sequencing within Task 4.2: one CL per method in this order:
+1. `MoveParagraph` + `MoveParagraphs` together (shared body)
+2. `MoveParagraphWithClones`
+3. `CleanupAfterDeletion`
+4. `ReplaceCollapsibleWhitespaceWithNonBreakingSpaceIfNeeded`
 
 ### Task 4.3: Heavy Composite Commands [Both - Weeks 7-8]
 

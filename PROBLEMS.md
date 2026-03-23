@@ -1,209 +1,219 @@
 # Why We Are Removing VisiblePosition from Editing Commands
 
 This document explains all the concrete problems caused by pervasive `VisiblePosition`
-usage in editing commands — what breaks, who feels it, and why the abstraction is
-misused in this context. It is not just about layout performance.
+usage in editing commands. The root cause is architectural: VP is a rendering type
+and does not belong inside command execution logic. Every other problem in this list
+is a downstream consequence of that one mistake.
 
 ---
 
-## Problem 1: Forced Layout Mid-Command (Performance)
+## Problem 1: VP Is the Wrong Type for Command Logic (Architecture)
 
-Every `CreateVisiblePosition()` call triggers `Document::UpdateStyleAndLayout()`.
-A composite editing command — paste, indent, list insertion — makes dozens of DOM
-mutations and dozens of VP constructions interleaved. Each VP construction forces a
-full style+layout recompute against a partially-mutated tree.
+`VisiblePosition` is a rendering concept. It answers the question: *where does the
+caret visually appear on screen, given the current layout?* It requires a live,
+up-to-date `LayoutObject` graph to be meaningful. It is correct at the
+renderer↔command boundary — where a user gesture is translated into a command, and
+where a command result is handed back to the renderer to update the cursor.
 
-**What the developer sees:**
-- `apply_block_element_command.cc` calls `GetDocument().UpdateStyleAndLayout()` at
-  lines 127, 248, 316, 353, 410 — five times inside a single command execution.
-- `composite_edit_command.cc` has `DCHECK(!GetDocument().NeedsLayoutTreeUpdate())`
-  gates at lines 972, 1079, 1452, 1470, 1604, 1753 — every one of these is a point
-  where the code *requires* layout to be clean before it can proceed, meaning
-  something before it forced a layout and now the code must assert it stayed clean.
+Editing commands operate on DOM structure. `DoApply()` asks questions like:
+- Is this position at the end of its paragraph?
+- What node delimits the current block?
+- Where does the next paragraph start?
 
-**What the user sees:**
-- Typing lag in large or complex documents (contenteditable with tables, large lists,
-  heavy CSS).
-- Jank during paste of rich content — the more complex the pasted content, the more
-  VP constructions fire, the more layout passes run mid-paste.
-- Slow indent/outdent on multi-paragraph selections because `IndentOutdentCommand`
-  loops over paragraphs and calls `MoveParagraph` per iteration, each of which
-  constructs multiple VPs.
+These are DOM-structural questions. They have answers expressible as `Position`
+values — node plus offset. They do not require knowing where the caret *looks* on a
+rendered line. The fact that the commands answer them using `VisiblePosition` is not
+a design choice — it is a historical accident. `IsEndOfParagraph`, `StartOfParagraph`,
+`MoveParagraph`, and similar functions simply did not have `Position` overloads when
+the commands were written, so VP was used as a type adapter throughout.
+
+**What this looks like in the code:**
+
+```cpp
+// The code wants: is this DOM position at a paragraph boundary?
+if (IsEndOfParagraph(CreateVisiblePosition(pos))) { ... }
+
+// The code wants: what Position is at the start of this paragraph?
+Position result = StartOfParagraph(CreateVisiblePosition(pos)).DeepEquivalent();
+
+// The code wants: pos
+VisiblePosition vp = CreateVisiblePosition(pos);
+SomeMethod(vp.DeepEquivalent());
+```
+
+In every case a `Position` is wrapped into a VP, used to call a function, then
+`.DeepEquivalent()` is called to unwrap it back to a `Position`. The VP contributes
+nothing except `UpdateStyleAndLayout()` as a side effect.
+
+The correct abstraction boundary is:
+
+```
+[Boundary-IN]   renderer hands VisibleSelection to the command system
+[Command body]  works entirely with Position / PositionWithAffinity / EphemeralRange
+[Boundary-OUT]  command hands SelectionForUndoStep back to the renderer
+```
+
+VP inside `DoApply()` is a type leak across that boundary. All other problems below
+are direct consequences of that leak.
 
 ---
 
 ## Problem 2: Stale VP After DOM Mutation (Correctness / Crashes)
 
-`VisiblePosition` records `dom_tree_version_` and `style_version_` at construction
-(`visible_position.cc:64-65`). `IsValid()` checks these at runtime
-(`visible_position.cc:244-246`). A VP captured before a DOM mutation is **technically
-invalid** after it — the document version changed, so the snapped canonical position
-may no longer refer to the same location in the tree.
+Commands mutate the DOM. `VisiblePosition` records `dom_tree_version_` and
+`style_version_` at construction (`visible_position.cc:64-65`). A VP captured before
+a mutation is **technically invalid** after it — the document version changed, so the
+snapped canonical position may no longer refer to the same location in the tree.
 
-The codebase acknowledges this explicitly with three separate TODO comments:
+`Position` has no such validity window. It is a raw node+offset reference that
+remains valid through mutations (subject only to the node itself being removed, which
+`RelocatablePosition` handles).
 
-```
+The codebase acknowledges the VP staleness problem explicitly with three separate
+TODO comments:
+
+```cpp
 // TODO(editing-dev): Stop storing VisiblePositions through mutations.
 // See crbug.com/648949 for details.
 ```
 
-This comment appears at:
+This appears at:
 - `insert_line_break_command.cc:89`
 - `insert_list_command.cc:763`
 - `replace_selection_command.cc:1077`
 
 In all three cases a VP is captured, then DOM is mutated, then the VP is used again.
 In debug builds this triggers `DCHECK(IsValid())` failures. In release builds it
-silently operates on a position that may point into a detached or restructured
-subtree.
+silently operates on a position that may point into a detached or restructured subtree.
 
 **What the developer sees:**
-- DCHECK failures in debug builds during editing operations, filed as `crbug.com/648949`.
-- Hard-to-reproduce crashes in release builds when editing complex content.
-- `InsertListCommand::MoveParagraphOverPositionIntoEmptyListItem` takes a
-  `VisiblePosition` parameter that was constructed before the `AppendNode` call
-  inside the method — the VP is stale the moment `AppendNode` fires.
+- DCHECK failures in debug builds, tracked as `crbug.com/648949`.
+- `InsertListCommand::MoveParagraphOverPositionIntoEmptyListItem` takes a VP
+  parameter that is stale the moment `AppendNode` fires inside the method.
+- `IsValid()` is gated on `#if DCHECK_IS_ON()` — in release builds it unconditionally
+  returns `true`. Stale VP bugs are invisible in shipped Chrome.
 
 **What the user sees:**
-- Rare but real crashes (especially on Android, where editing of complex web pages
-  with lists is common).
-- Silent correctness bugs: the wrong paragraph gets moved, the wrong range gets
-  deleted, the caret lands in the wrong place after an operation.
+- Rare but real crashes, especially on Android with list-heavy pages.
+- Silent correctness bugs: wrong paragraph moved, wrong range deleted, caret lands
+  in the wrong place after paste or indent.
 
 ---
 
-## Problem 3: The VP Parameter Cascade (Code Complexity)
+## Problem 3: Forced Layout Mid-Command (Performance)
 
-`MoveParagraph`, `MoveParagraphs`, `MoveParagraphWithClones`, `CleanupAfterDeletion`,
-and `ReplaceCollapsibleWhitespaceWithNonBreakingSpaceIfNeeded` take `VisiblePosition`
-parameters. This forces every caller to construct VPs even when the caller is already
-working with raw `Position` values.
+`CreateVisiblePosition()` calls `CanonicalPositionOf()`, which calls
+`Document::UpdateStyleAndLayout()`. A composite editing command — paste, indent, list
+insertion — constructs dozens of VPs interleaved with DOM mutations. Each VP
+construction forces a full style+layout recompute against a partially-mutated tree.
 
-The cascade: `IndentOutdentCommand` loops over paragraphs, constructs VPs from
-`Position`s, calls `MoveParagraph`, which internally calls `StartOfParagraph(VP)`,
-which calls `CanonicalPositionOf` — another `UpdateStyleAndLayout`. A single
-`IndentOutdentCommand::IndentBlock` call triggers layout multiple times per
-paragraph in the selection.
+This cost exists entirely because of Problem 1: the wrong type is being used, and
+that type happens to require layout. If the commands used `Position` throughout,
+no mid-command layout would be forced.
 
 **What the developer sees:**
-- You cannot call `MoveParagraph` without constructing 3 VPs, even if you have
-  perfectly good `Position` values. The type signature forces the cost.
-- Tracing the flow of a VP through callers is non-trivial — by the time it arrives
-  at `MoveParagraphs`, the VP may have been constructed 3 call frames up, with DOM
-  mutations in between.
-- `indent_outdent_command.cc` has 38 VP references, the majority of which exist
-  solely to satisfy `MoveParagraph`'s signature.
+- `apply_block_element_command.cc` calls `GetDocument().UpdateStyleAndLayout()` at
+  lines 127, 248, 316, 353, 410 — five times inside a single command execution.
+- `composite_edit_command.cc` has `DCHECK(!GetDocument().NeedsLayoutTreeUpdate())`
+  gates at lines 972, 1079, 1452, 1470, 1604, 1753 — each is a point where the code
+  requires layout to be clean before proceeding.
+- `EndingVisibleSelection()` calls `UpdateStyleAndLayout()` unconditionally, even
+  when the caller already did so one line earlier (double-layout on a clean tree).
 
 **What the user sees:**
-- Same jank as Problem 1, but multiplied: a Shift+Tab on a 20-item list triggers
-  the cascade 20 times.
+- Typing lag in large or complex documents (contenteditable with tables, lists,
+  heavy CSS).
+- Jank during paste of rich content.
+- Slow indent/outdent on multi-paragraph selections.
 
 ---
 
-## Problem 4: VP Validity is Only Checked in Debug Builds
+## Problem 4: The VP Parameter Cascade (Code Complexity)
 
-`VisiblePosition::IsValid()` is gated on `#if DCHECK_IS_ON()` — the actual version
-check only runs in debug builds (`visible_position.cc:240-248`). In release builds
-`IsValid()` unconditionally returns `true`. This means:
+Because `MoveParagraph`, `MoveParagraphs`, `MoveParagraphWithClones`,
+`CleanupAfterDeletion`, and `ReplaceCollapsibleWhitespaceWithNonBreakingSpaceIfNeeded`
+take `VisiblePosition` parameters, every caller must construct VPs even when working
+with perfectly good `Position` values.
 
-- Stale VPs (Problem 2) are silently tolerated in production.
-- There is no runtime protection against using a VP that was constructed before a
-  mutation and is now pointing at a dangling or restructured position.
-- The code *looks* safe because of the DCHECK infrastructure, but the safety only
-  exists in the builds developers run locally — not in shipped Chrome.
-
-**What the developer sees:**
-- Tests pass in debug builds (DCHECKs fire and catch issues). Flaky crashes in
-  release/field builds go undiagnosed because there is no signal.
-- The `TODO: Stop storing VisiblePositions through mutations` comments are years old
-  (crbug.com/648949 is a long-running bug) — the fact that they haven't been fixed
-  is partly because the DCHECK infrastructure makes the issue intermittent.
-
----
-
-## Problem 5: VP Obscures What the Code Actually Needs
-
-Most VP usage in commands falls into one of these shapes:
-
-```cpp
-if (IsEndOfParagraph(CreateVisiblePosition(pos))) { ... }
-// Only needs: is pos at the end of its paragraph?
-
-Position result = StartOfParagraph(CreateVisiblePosition(pos)).DeepEquivalent();
-// Only needs: what Position is at the paragraph start?
-
-VisiblePosition vp = CreateVisiblePosition(pos);
-// ... 3 lines later ...
-SomeMethod(vp.DeepEquivalent());
-// Only needs: pos
-```
-
-In every case the code wants a DOM-structural answer (is this position at a paragraph
-boundary? what node starts this block?). VP provides a *visual* answer that requires
-layout. The code is using a heavier tool than the question requires.
+`indent_outdent_command.cc` has 38 VP references. The majority exist solely to
+satisfy `MoveParagraph`'s signature. The cascade: construct VP from `Position`, pass
+to `MoveParagraph`, which internally calls `StartOfParagraph(VP)`, which calls
+`CanonicalPositionOf` — another `UpdateStyleAndLayout`. One `IndentBlock` call
+triggers layout multiple times per paragraph in the selection.
 
 **What the developer sees:**
-- Reading `composite_edit_command.cc` is harder than it should be because every
-  algorithm is written in terms of VP even when the algorithm is purely structural.
-  The visual/layout machinery obscures the DOM intent.
-- Adding a new editing command means cargo-culting the VP pattern because it is
-  everywhere — new contributors learn the wrong idiom.
-- Code review of editing patches is harder: reviewers must mentally track VP
-  lifetimes across mutations to reason about correctness.
+- You cannot call `MoveParagraph` without constructing 3 VPs, even with perfectly
+  good `Position` values. The type signature forces the cost.
+- Tracing a VP through callers is non-trivial — by the time it arrives at
+  `MoveParagraphs`, it may have been constructed 3 call frames up, with DOM mutations
+  in between.
 
 **What the user sees:**
-- Indirect: more bugs introduced by new contributors who follow the existing
-  pattern without understanding the mutation-validity hazard.
+- The cascade cost multiplied: Shift+Tab on a 20-item list triggers it 20 times.
 
 ---
 
-## Problem 6: VP Makes Commands Impossible to Unit Test Without a Layout Tree
+## Problem 5: VP Makes Command Logic Harder to Read and Review
+
+Because VP is a rendering type, reading command code requires simultaneously tracking
+two concerns: the DOM-structural algorithm and the rendering side-effects. These do
+not belong together.
+
+**What the developer sees:**
+- `composite_edit_command.cc` algorithms are written in terms of VP even when purely
+  structural. The visual/layout machinery obscures the DOM intent.
+- New contributors cargo-cult the VP pattern because it is everywhere — they learn
+  the wrong idiom and introduce new VP usage in new commands.
+- Code review of editing patches requires mentally tracking VP lifetimes across
+  mutations to reason about correctness. This is non-trivial and routinely misses
+  the staleness hazard (Problem 2).
+
+**What the user sees:**
+- Indirect: more bugs shipped by contributors who follow the existing pattern without
+  understanding the mutation-validity hazard.
+
+---
+
+## Problem 6: VP Requires a Full Rendering Pipeline for Unit Tests
 
 `CreateVisiblePosition` requires a clean, up-to-date layout tree
-(`visible_position.cc:107`: `DCHECK(!document.NeedsLayoutTreeUpdate())`). This means
-any command that uses VP internally cannot be unit tested with a lightweight DOM —
-it requires a full rendering pipeline.
+(`visible_position.cc:107`: `DCHECK(!document.NeedsLayoutTreeUpdate())`). Any command
+that uses VP internally cannot be tested with a lightweight DOM fixture — it requires
+a full rendering pipeline.
 
 **What the developer sees:**
-- Editing command tests live in `editing_commands_*_test.cc` and require
-  `RenderingTest` or `EditingTestBase` with full layout infrastructure.
-- You cannot write a fast, lightweight unit test that exercises `MoveParagraphs`
-  logic in isolation — the test must set up and run layout.
-- Test suite for editing commands is slow as a result, reducing the feedback loop
-  during development.
-- Mocking or stubbing VP behavior is impractical — the type requires real layout
-  state, not a fake position.
+- Editing command tests require `RenderingTest` or `EditingTestBase` with full layout
+  infrastructure. A fast, lightweight unit test for `MoveParagraphs` logic in
+  isolation is not possible today.
+- The test suite for editing commands is slow, degrading the development feedback loop.
 
 ---
 
-## Problem 7: VP Blocks the Path to Off-Thread Editing
+## Problem 7: VP Pins Commands to the Main Thread Layout Tree
 
-Blink's longer-term direction is to move editing operations (especially for
-`contenteditable` and IME) further from the main thread layout. `VisiblePosition`
-is fundamentally tied to the main thread layout tree — it cannot exist without a
-live, up-to-date `LayoutObject` graph.
+`VisiblePosition` cannot exist without a live, up-to-date `LayoutObject` graph on the
+main thread. As long as editing commands are written in terms of VP, they cannot be
+factored into code that runs without layout.
 
-As long as editing commands are written in terms of VP, they cannot be factored
-into code that runs without layout. Every VP call is an implicit main-thread
-layout dependency pinned into the command logic.
+Blink's direction for `contenteditable` and IME is to reduce main-thread layout
+dependencies. VP usage inside `DoApply()` is a structural blocker for any such work:
+every VP construction is an implicit main-thread layout dependency pinned into
+command logic.
 
 **What the developer sees:**
-- Any attempt to refactor editing commands toward a data model separate from the
-  rendering tree immediately hits VP as a blocker.
-- `CompositeEditCommand` cannot be made to operate on a detached document fragment
-  (e.g., for speculative editing or undo batching) because VP requires a live
-  connected document with layout.
+- Any attempt to operate on a detached document fragment (e.g., speculative editing,
+  undo batching, or off-thread IME) immediately hits VP as a hard blocker.
 
 ---
 
-## Summary: Problems by Stakeholder
+## Summary
 
-| Problem | Developer impact | User impact |
-|---------|-----------------|-------------|
-| Forced layout mid-command | Extra `UpdateStyleAndLayout` calls per command | Typing/paste jank, especially on complex pages |
-| Stale VP after mutation | DCHECK crashes in debug, silent bugs in release | Rare crashes, caret landing in wrong place |
-| VP parameter cascade | Forced VP construction at every call site | Multiplied jank on multi-paragraph operations |
-| Debug-only validity checks | Release bugs invisible until they crash in the field | Intermittent crashes with no repro path |
-| VP obscures DOM intent | Harder code review, wrong idiom taught to new contributors | Indirect: more bugs shipped |
-| Requires full layout for tests | Slow test suite, no lightweight unit tests for command logic | Indirect: slower iteration, bugs shipped |
-| Blocks off-thread editing | Structural blocker for future architecture work | Indirect: editing stays on main thread longer |
+| Problem | Root cause | Developer impact | User impact |
+|---------|-----------|-----------------|-------------|
+| Wrong abstraction | VP is a rendering type used for DOM-structural logic | Code harder to read, wrong idiom taught, VP leaks across boundary | All other problems below |
+| Stale VP after mutation | VP validity window does not survive DOM mutations | DCHECK crashes (debug), silent bugs (release), crbug.com/648949 | Rare crashes, wrong caret position |
+| Forced layout mid-command | `CreateVisiblePosition` calls `UpdateStyleAndLayout` | Extra layout passes per command, double-layout patterns | Typing/paste jank on complex pages |
+| VP parameter cascade | Infrastructure signatures take VP, forcing callers | VP construction forced at every call site, non-traceable lifetimes | Multiplied jank on multi-paragraph operations |
+| Obscures DOM intent | VP mixes rendering semantics into structural algorithms | Harder code review, mutation-validity hazard invisible to reviewers | Bugs from new contributors following existing pattern |
+| Requires full rendering for tests | `CreateVisiblePosition` requires live layout tree | No lightweight unit tests for command logic, slow test suite | Slower iteration, bugs shipped |
+| Blocks off-thread work | VP tied to main-thread `LayoutObject` graph | Structural blocker for future architecture work | Editing stays on main thread longer |

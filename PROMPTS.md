@@ -73,7 +73,27 @@ Position EndOfDocument(const Position&);
 bool IsStartOfDocument(const Position&);
 bool IsEndOfDocument(const Position&);
 UChar32 CharacterAfter(const Position&);
+
+// Adjacent position — existing overloads return VisiblePosition; add Position-returning versions.
+// Do NOT change existing signatures; add new overloads alongside them.
+Position PreviousPositionOf(const Position&,
+                            EditingBoundaryCrossingRule = kCanCrossEditingBoundary);
+Position NextPositionOf(const Position&,
+                        EditingBoundaryCrossingRule = kCanCrossEditingBoundary);
 ```
+
+**Implementation note for `PreviousPositionOf(Position)` and `NextPositionOf(Position)`:**
+
+`PreviousVisuallyDistinctCandidateAlgorithm` and `NextVisuallyDistinctCandidateAlgorithm`
+already take and return `Position` with no layout forcing. The layout cost in the
+existing VP overloads comes entirely from the `CreateVisiblePosition(prev_position)`
+call inside the algorithm, which is only there to re-canonicalize and check for
+null movement.
+
+Implement the `Position` overloads by calling the candidate algorithm directly and
+handling boundary rules via `AdjustBackward/ForwardPositionToAvoidCrossingEditingBoundaries`
+(which takes/returns `PositionWithAffinity` — extract `.GetPosition()`). No
+`CreateVisiblePosition` anywhere in the implementation.
 
 **In `editing_commands_utilities.h` / `editing_commands_utilities.cc`:**
 
@@ -370,10 +390,5 @@ The following VP usage is correct. Do not touch it in any phase.
 2. **Exit boundary** — `EndingVisibleSelection()` in `Apply()` for the
    `IsRichlyEditablePosition` check. This is the command → renderer boundary-out.
 
-3. **Affinity-sensitive navigation** where the result depends on line-wrap affinity
-   and the VP is immediately stored in `RelocatablePosition`. If you encounter
-   this, leave it with a comment:
-   `// VP required: affinity-sensitive, immediately stored as RelocatablePosition.`
-
-4. **`IndexForVisiblePosition` / `VisiblePositionForIndex` / `MakeRange(VP, VP)`
+3. **`IndexForVisiblePosition` / `VisiblePositionForIndex` / `MakeRange(VP, VP)`
    in `editing_utilities.cc`** — explicit public API contracts. Out of scope.

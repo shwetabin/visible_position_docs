@@ -147,8 +147,8 @@ All changes are in `composite_edit_command.h` and `composite_edit_command.cc`.
 | Location | Current code | Change to |
 |---|---|---|
 | Line 1367–1368 | `const VisiblePosition& start_of_paragraph_to_move, end_of_paragraph_to_move` | `const Position& start, const Position& end` |
-| Line 1380 | `PreviousPositionOf(start_of_paragraph_to_move).DeepEquivalent()` | `PreviousPositionOf(start, kCannotCrossEditingBoundary)` |
-| Line 1383 | `NextPositionOf(end_of_paragraph_to_move).DeepEquivalent()` | `NextPositionOf(end, ...)` using `Position` overload |
+| Line 1380 | `PreviousPositionOf(start_of_paragraph_to_move).DeepEquivalent()` | `PreviousPositionOf(start, kCannotCrossEditingBoundary)` — Phase 1 `Position`-returning overload |
+| Line 1383 | `NextPositionOf(end_of_paragraph_to_move).DeepEquivalent()` | `NextPositionOf(end, kCannotCrossEditingBoundary)` — Phase 1 `Position`-returning overload |
 | Line 1389–1394 | `start_of_paragraph_to_move.DeepEquivalent()` / `end_of_paragraph_to_move.DeepEquivalent()` | `start` / `end` directly |
 | Lines 1427–1436 | `CreateVisiblePosition(relocatable_before_paragraph->GetPosition())` / same for after | `relocatable_before_paragraph->GetPosition()` — use `Position` comparisons directly |
 
@@ -160,7 +160,7 @@ All changes are in `composite_edit_command.h` and `composite_edit_command.cc`.
 | Lines 1475–1476 | `start_of_paragraph_to_move.DeepEquivalent() == destination.DeepEquivalent()` | `start == destination` |
 | Lines 1481–1484 | `destination.DeepEquivalent() >= start_of_paragraph_to_move.DeepEquivalent() && ...` | `ComparePositions(destination, start) >= 0 && ComparePositions(destination, end) <= 0` |
 | Lines 1496–1497 | `VisiblePosition visible_start = EndingVisibleSelection().VisibleStart()` / `visible_end` | `Position visible_start = EndingSelection().Start()` / `.End()` |
-| Lines 1545/1549 | `...->GetPosition()).DeepEquivalent()` (RelocatablePosition after mutations) | `...->GetPosition()` directly |
+| Lines 1541–1549 | `PreviousPositionOf(start_of_paragraph_to_move, kCannotCrossEditingBoundary).DeepEquivalent()` / `NextPositionOf(end...).DeepEquivalent()` | `PreviousPositionOf(start, kCannotCrossEditingBoundary)` / `NextPositionOf(end, kCannotCrossEditingBoundary)` — Phase 1 `Position`-returning overloads; no VP, no layout forced |
 | Lines 1551–1552 | `start_of_paragraph_to_move.DeepEquivalent()` / `end...` | `start` / `end` |
 | Lines 1573–1574 | `start_of_paragraph_to_move.DeepEquivalent() != end_of_paragraph_to_move.DeepEquivalent()` | `start != end` |
 | Lines 1590–1591 | same pattern | same |
