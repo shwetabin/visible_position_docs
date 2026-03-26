@@ -1,10 +1,5 @@
 # Design: Reducing VisiblePosition Usage in Editing Commands
 
-**Status:** Draft for review
-**Audience:** Chromium editing-dev owners
-**Authors:** TBD
-**Last updated:** 2026-03-17
-
 ---
 
 ## Background
@@ -13,8 +8,7 @@
 
 `VisiblePosition` is Blink's canonicalized cursor position type. It answers the
 question: *where does the caret visually appear on screen, given the current layout?*
-Creating one unconditionally calls `Document::UpdateStyleAndLayout()`, which forces
-Blink to recompute style and layout for the entire document. This cost is intentional
+This is intentional
 and correct at two points in the editing pipeline:
 
 - **Entry** — when a user gesture (keypress, mouse click, IME commit) is translated
@@ -101,6 +95,24 @@ boundary points and two affinity-sensitive navigation sites.
 The ~66 remaining VP references are the two boundary sites, the confirmed
 affinity-sensitive navigation, and a small number of sites pending owner review on
 canonicality (see Open Questions).
+
+### Known bugs and test failures blocked on this work
+
+**Open Chromium bugs:** The hotlist
+[issues.chromium.org/hotlists/7675360](https://issues.chromium.org/hotlists/7675360)
+tracks bugs that are directly caused by or made significantly harder to fix by the
+forced `UpdateStyleAndLayout` calls and stale-VP usage inside editing commands.
+As of the time of writing there are **25–30 open issues** in the hotlist — covering
+wrong caret placement after paste, incorrect selection after list insertion, undo/redo
+producing the wrong selection, and indent/outdent leaving the caret in a detached
+subtree.
+
+**Web Platform Tests:** Several WPT failures in `editing/` and `contenteditable/` are
+attributable to commands reading a stale or incorrectly-canonicalized position after
+a DOM mutation. These failures are not straightforwardly fixable today because the
+root cause — VP construction interleaved with mutations — makes it difficult to reason
+about which position is current at any given point. Removing VP from command internals
+is a prerequisite for a clean fix.
 
 ---
 
@@ -205,7 +217,7 @@ except a redundant second layout and a VP wrapper that is immediately discarded.
 
 ---
 
-## Proposed Approach: Hybrid (bottom-up foundation, top-down infrastructure)
+## Proposed Approach: bottom-up foundation, top-down infrastructure
 
 The approach combines two complementary moves in a specific order that keeps every
 intermediate state compile-clean and independently testable:
@@ -216,16 +228,6 @@ intermediate state compile-clean and independently testable:
    instead of `VisiblePosition` (top-down, uses the new overloads internally).
 3. **Migrate command files** using the new overloads and the new infrastructure
    signatures, in ascending order of VP count.
-
-### Why this ordering
-
-Doing the signature changes (step 2) without the overloads (step 1) is blocked: the
-bodies of `MoveParagraphs` and related methods still need navigation functions that
-only have VP overloads. Adding the overloads first makes step 2 possible.
-
-Doing only the overloads (step 1) without the signature changes leaves the P4 cascade
-intact: callers of `MoveParagraph` are still forced to create VPs regardless. Step 2
-eliminates this entire class of forced VP creation in one CL per method.
 
 ---
 
@@ -438,7 +440,18 @@ Not all VP usage should be removed. The following are correct uses:
    `IsRichlyEditablePosition(EndingVisibleSelection().Anchor())`. This is correct —
    it is the boundary-out validation point.
 
-3. **`VisiblePosition::FirstPositionInNode` / `LastPositionInNode` as equality
+3. **Visual-caret equivalence checks.** Some positions are structurally distinct
+   but render to the same visual caret (e.g. `AfterNode(foo)` and `BeforeNode(bar)`
+   for adjacent inlines). When the question is "did the caret actually move?", VP
+   equivalence is the right tool. `PositionAvoidingPrecedingNodes` in
+   `replace_selection_command.cc:170–171` uses it as a loop-exit guard when walking
+   up toward the block boundary; `DeleteSelectionCommand::InitializePositionData` at
+   `delete_selection_command.cc:149–153` uses it to detect whether expanding the
+   selection into a special container changed the visible endpoints. More such sites
+   may exist. `MostForwardCaretPosition(x) == MostForwardCaretPosition(y)` is often
+   a valid layout-free replacement, but each site requires individual confirmation.
+
+4. **`VisiblePosition::FirstPositionInNode` / `LastPositionInNode` as equality
    tests.** Some sites in `delete_selection_command.cc` use these to check whether a
    cell is empty. This may be replaceable with `Position::FirstPositionInNode` /
    `LastPositionInNode`, but requires per-site analysis to confirm the positions are
@@ -465,23 +478,6 @@ indent/outdent, Enter key inside list items, table editing.
 **Regression monitoring:**
 Watch CQ for editing test failures for 2 weeks after each step lands.
 
----
-
-## Open Questions
-
-1. **`EndingVisibleSelection()` sites with no existing layout gate** — are there any
-   in the heavy commands where the VP snap is genuinely load-bearing (not just a type
-   adapter)? Owner review needed before Step 4 CLs for `delete_selection_command.cc`,
-   `insert_list_command.cc`, `replace_selection_command.cc`.
-
-2. **`MoveParagraphs` line 1741** — is `PlainTextRange::CreateRangeForSelection`
-   output already canonical? If yes, drop `CreateVisibleSelection`. If no, keep it as
-   legitimate boundary-out VP.
-
-3. **`SelectionForParagraphIteration`** — change to `SelectionInDOMTree` in Step 4
-   (`apply_block_element_command.cc`), or defer? Affects `format_block_command.cc` too.
-
----
 
 ## Next Steps: Beyond Commands
 
