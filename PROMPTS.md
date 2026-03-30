@@ -39,17 +39,37 @@ clarification.
 
 ## PHASE 1 — Add Position-based Navigation Overloads
 
-**Nature:** Purely additive. No existing code is changed.
+**Nature:** Purely additive. No existing code is changed (except relocating existing
+`Position` overloads from `visible_units.h` into the new file in CL 1-A).
 
 Working directory: `third_party/blink/renderer/core/editing/`
 
 ---
 
-### CL 1-A — Trivial wrappers
+### CL 1-A — New file + trivial wrappers
 
-**Files:** `visible_units_paragraph.cc`, `visible_units.cc`, `visible_units.h`
+**Create:** `visible_units_position.h`, `visible_units_position.cc`
 
-**Functions to add:**
+This CL establishes the new home for all `Position`-based navigation. No
+`VisiblePosition` types appear anywhere in these two files.
+
+**Step 1 — Relocate existing `Position` overloads from `visible_units.h`:**
+
+Move the declarations and definitions of the following from `visible_units.h` /
+`visible_units.cc` into `visible_units_position.h` / `visible_units_position.cc`,
+and remove them from the originals:
+
+- `StartOfWordPosition(const Position&)`
+- `EndOfWordPosition(const Position&)`
+- `StartOfLine(const PositionWithAffinity&)` → `PositionWithAffinity`
+- `EndOfLine(const PositionWithAffinity&)` → `PositionWithAffinity`
+- `InSameLine(const PositionWithAffinity&, const PositionWithAffinity&)`
+- `StartOfDocument(const Position&)` → `Position`
+
+Update every file that included `visible_units.h` for these functions to include
+`visible_units_position.h` instead (or in addition, if they also use VP functions).
+
+**Step 2 — Add new trivial `Position` overloads in `visible_units_position.cc`:**
 
 ```cpp
 Position StartOfParagraph(const Position&,
@@ -103,17 +123,25 @@ autoninja -C out/Default blink_unittests
 
 ### CL 1-B — Non-trivial overloads
 
-**Files:** `visible_units.cc`, `visible_units.h`
+**Files:** `visible_units_position.cc`, `visible_units_position.h`
+(do NOT add to `visible_units.cc` / `visible_units.h`)
 
 **Functions to add:**
 
 ```cpp
-// Do NOT change existing VP-returning signatures. Add new Position-returning overloads.
+// Do NOT change existing VP-returning signatures in visible_units.h.
+// Add new Position-returning overloads in visible_units_position.h only.
 Position PreviousPositionOf(const Position&,
                             EditingBoundaryCrossingRule = kCanCrossEditingBoundary);
 Position NextPositionOf(const Position&,
                         EditingBoundaryCrossingRule = kCanCrossEditingBoundary);
 UChar32 CharacterAfter(const Position&);
+
+// Line boundary — no Position overloads exist today.
+bool IsStartOfLine(const PositionWithAffinity&);
+bool IsStartOfLine(const Position&);
+bool IsEndOfLine(const PositionWithAffinity&);
+bool IsEndOfLine(const Position&);
 ```
 
 **Implementation for `PreviousPositionOf` / `NextPositionOf`:**
@@ -144,10 +172,40 @@ Replicate the character-reading logic from the VP overload. Call
 `MostForwardCaretPosition(pos)` directly to get the forward position, then read the
 character — no VP construction.
 
+**Implementation for `IsStartOfLine` / `IsEndOfLine`:**
+`StartOfLine(PositionWithAffinity)` and `EndOfLine(PositionWithAffinity)` already
+exist (relocated from `visible_units.h` in CL 1-A). Delegate to them:
+
+```cpp
+bool IsStartOfLine(const PositionWithAffinity& pos) {
+  return pos == StartOfLine(pos);
+}
+bool IsStartOfLine(const Position& pos) {
+  return IsStartOfLine(PositionWithAffinity(pos));
+}
+bool IsEndOfLine(const PositionWithAffinity& pos) {
+  return pos == EndOfLine(pos);
+}
+bool IsEndOfLine(const Position& pos) {
+  return IsEndOfLine(PositionWithAffinity(pos));
+}
+```
+
+The one existing VP call site this fixes is `editing_commands_utilities.cc:301`:
+```cpp
+// Before:
+IsStartOfLine(CreateVisiblePosition(position, affinity))
+// After:
+IsStartOfLine(PositionWithAffinity(position, affinity))
+```
+
+`LogicalStartOfLine`, `LogicalEndOfLine`, `IsLogicalEndOfLine` — no `Position`
+overloads in this CL. Zero VP call sites in `commands/`; defer to follow-on work.
+
 **Verification:**
 ```
 autoninja -C out/Default blink_unittests
-./out/Default/blink_unittests --gtest_filter="*Edit*:*Character*"
+./out/Default/blink_unittests --gtest_filter="*Edit*:*Character*:*Line*"
 ```
 
 ---
@@ -185,8 +243,13 @@ autoninja -C out/Default blink_unittests
 
 **Phase 1 gate:** All three CLs compile, all new unit tests pass:
 ```
-./out/Default/blink_unittests --gtest_filter="*Paragraph*:*Document*:*Block*:*Edit*"
+./out/Default/blink_unittests --gtest_filter="*Paragraph*:*Document*:*Block*:*Edit*:*Line*"
 ```
+
+**Include rule after Phase 1:** Command files (and any other callers) must include
+`visible_units_position.h` for `Position`-typed queries and `visible_units.h` only
+when VP-returning functions are still needed. A file that has completed VP cleanup
+should include `visible_units_position.h` only and have no `visible_units.h` include.
 
 ---
 
