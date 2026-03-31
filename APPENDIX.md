@@ -7,48 +7,54 @@ with line numbers in the current tree so owners can verify each site before and 
 
 ## Phase 1 — Add Position-based Overloads
 
-All new `Position`-typed functions are declared in **`visible_units_position.h`**
-and defined in **`visible_units_position.cc`**. They call into algorithm templates
-in the existing implementation files (`visible_units_paragraph.cc`,
-`visible_units.cc`) — those files are not changed except to forward-declare any
-algorithm templates that need to be visible from `visible_units_position.cc`.
+All new `Position`-typed functions are declared in **`position_units.h`** and
+defined in per-unit implementation files mirroring the `visible_units_*.cc` split:
+
+| Implementation file | Unit |
+|---|---|
+| `position_units_word.cc` | word boundary functions |
+| `position_units_sentence.cc` | sentence boundary functions |
+| `position_units_line.cc` | line boundary + `IsStartOfLine` / `IsEndOfLine` |
+| `position_units_paragraph.cc` | paragraph boundary functions |
+| `position_units.cc` | document boundary, editable content, traversal, character |
+
+Each `position_units_*.cc` calls into the algorithm templates in the corresponding
+`visible_units_*.cc` — those files are not changed except to forward-declare any
+templates that need to be visible from the new files.
 
 The existing `Position`/`PositionWithAffinity` overloads currently in
-`visible_units.h` / `visible_units.cc` are **relocated** to
-`visible_units_position.h` / `visible_units_position.cc` in CL 1-A and removed
-from the originals.
+`visible_units.h` are **relocated** to `position_units.h` and their definitions
+moved to the corresponding `position_units_*.cc` in CL 1-A.
 
-### `visible_units_position.h` — functions declared (CL 1-A: relocated + new trivial)
+### `position_units.h` — functions declared (CL 1-A: relocated + new trivial)
 
-| Function | Source of definition | Notes |
+| Function | Defined in | Notes |
 |---|---|---|
-| `StartOfWordPosition(const Position&)` | relocated from `visible_units.cc` | |
-| `EndOfWordPosition(const Position&)` | relocated from `visible_units.cc` | |
-| `StartOfLine(const PositionWithAffinity&)` | relocated from `visible_units.cc` | |
-| `EndOfLine(const PositionWithAffinity&)` | relocated from `visible_units.cc` | |
-| `InSameLine(const PositionWithAffinity&, const PositionWithAffinity&)` | relocated from `visible_units.cc` | |
-| `StartOfDocument(const Position&)` | relocated from `visible_units.cc` | |
-| `Position StartOfParagraph(const Position&, EditingBoundaryCrossingRule)` | new — calls `StartOfParagraphAlgorithm<EditingStrategy>` | |
-| `Position EndOfParagraph(const Position&, EditingBoundaryCrossingRule)` | new — calls `EndOfParagraphAlgorithm<EditingStrategy>` | |
-| `bool IsStartOfParagraph(const Position&, EditingBoundaryCrossingRule)` | new — delegate to `StartOfParagraph` | |
-| `bool IsEndOfParagraph(const Position&, EditingBoundaryCrossingRule)` | new — delegate to `EndOfParagraph` | |
-| `Position StartOfNextParagraph(const Position&)` | new — check for `StartOfNextParagraphAlgorithm` | |
-| `bool InSameParagraph(const Position&, const Position&, EditingBoundaryCrossingRule)` | new — `StartOfParagraph(a) == StartOfParagraph(b)` | |
-| `Position EndOfDocument(const Position&)` | new — `Position::LastPositionInNode(...)` | |
-| `bool IsStartOfDocument(const Position&)` | new — `pos == StartOfDocument(pos)` | |
-| `bool IsEndOfDocument(const Position&)` | new — `pos == EndOfDocument(pos)` | |
+| `StartOfWordPosition(const Position&)`, `EndOfWordPosition`, `MiddleOfWordPosition`, `PreviousWordPosition`, `NextWordPosition` (all `Position`/`PositionInFlatTree` overloads) | `position_units_word.cc` | relocated from `visible_units_word.cc` |
+| `StartOfSentencePosition(const Position&)`, `EndOfSentence(Position)`, `PreviousSentencePosition`, `NextSentencePosition`, `ExpandEndToSentenceBoundary`, `ExpandRangeToSentenceBoundary` | `position_units_sentence.cc` | relocated from `visible_units_sentence.cc` |
+| `StartOfLine(PositionWithAffinity)`, `StartOfLine(PositionInFlatTreeWithAffinity)`, `EndOfLine(PositionWithAffinity)`, `EndOfLine(PositionInFlatTreeWithAffinity)`, `InSameLine(PositionWithAffinity, ...)`, `InSameLine(PositionInFlatTreeWithAffinity, ...)` | `position_units_line.cc` | relocated from `visible_units_line.cc` |
+| `StartOfDocument(const Position&)`, `StartOfDocument(PositionInFlatTree)`, `StartOfEditableContent`, `EndOfEditableContent` | `position_units.cc` | relocated from `visible_units.cc` |
+| `Position StartOfParagraph(const Position&, EditingBoundaryCrossingRule)` | `position_units_paragraph.cc` | new — calls `StartOfParagraphAlgorithm<EditingStrategy>` |
+| `Position EndOfParagraph(const Position&, EditingBoundaryCrossingRule)` | `position_units_paragraph.cc` | new — calls `EndOfParagraphAlgorithm<EditingStrategy>` |
+| `bool IsStartOfParagraph(const Position&, EditingBoundaryCrossingRule)` | `position_units_paragraph.cc` | new — delegate to `StartOfParagraph` |
+| `bool IsEndOfParagraph(const Position&, EditingBoundaryCrossingRule)` | `position_units_paragraph.cc` | new — delegate to `EndOfParagraph` |
+| `Position StartOfNextParagraph(const Position&)` | `position_units_paragraph.cc` | new — check for `StartOfNextParagraphAlgorithm` |
+| `bool InSameParagraph(const Position&, const Position&, EditingBoundaryCrossingRule)` | `position_units_paragraph.cc` | new — `StartOfParagraph(a) == StartOfParagraph(b)` |
+| `Position EndOfDocument(const Position&)` | `position_units.cc` | new — `Position::LastPositionInNode(...)` |
+| `bool IsStartOfDocument(const Position&)` | `position_units.cc` | new — `pos == StartOfDocument(pos)` |
+| `bool IsEndOfDocument(const Position&)` | `position_units.cc` | new — `pos == EndOfDocument(pos)` |
 
-### `visible_units_position.h` — functions declared (CL 1-B: non-trivial + line)
+### `position_units.h` — functions declared (CL 1-B: non-trivial + line)
 
-| Function | Notes |
-|---|---|
-| `Position PreviousPositionOf(const Position&, EditingBoundaryCrossingRule)` | calls `PreviousVisuallyDistinctCandidate` directly |
-| `Position NextPositionOf(const Position&, EditingBoundaryCrossingRule)` | calls `NextVisuallyDistinctCandidate` directly |
-| `UChar32 CharacterAfter(const Position&)` | calls `MostForwardCaretPosition` directly |
-| `bool IsStartOfLine(const PositionWithAffinity&)` | `pos == StartOfLine(pos)` |
-| `bool IsStartOfLine(const Position&)` | delegates to `PositionWithAffinity` overload |
-| `bool IsEndOfLine(const PositionWithAffinity&)` | `pos == EndOfLine(pos)` |
-| `bool IsEndOfLine(const Position&)` | delegates to `PositionWithAffinity` overload |
+| Function | Defined in | Notes |
+|---|---|---|
+| `Position PreviousPositionOf(const Position&, EditingBoundaryCrossingRule)` | `position_units.cc` | calls `PreviousVisuallyDistinctCandidate` directly |
+| `Position NextPositionOf(const Position&, EditingBoundaryCrossingRule)` | `position_units.cc` | calls `NextVisuallyDistinctCandidate` directly |
+| `UChar32 CharacterAfter(const Position&)` | `position_units.cc` | calls `MostForwardCaretPosition` directly |
+| `bool IsStartOfLine(const PositionWithAffinity&)` | `position_units_line.cc` | `pos == StartOfLine(pos)` |
+| `bool IsStartOfLine(const Position&)` | `position_units_line.cc` | delegates to `PositionWithAffinity` overload |
+| `bool IsEndOfLine(const PositionWithAffinity&)` | `position_units_line.cc` | `pos == EndOfLine(pos)` |
+| `bool IsEndOfLine(const Position&)` | `position_units_line.cc` | delegates to `PositionWithAffinity` overload |
 
 ### `editing_commands_utilities.cc` / `editing_commands_utilities.h`
 

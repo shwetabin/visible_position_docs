@@ -46,30 +46,40 @@ Working directory: `third_party/blink/renderer/core/editing/`
 
 ---
 
-### CL 1-A — New file + trivial wrappers
+### CL 1-A — New files + trivial wrappers
 
-**Create:** `visible_units_position.h`, `visible_units_position.cc`
+**Create:** `position_units.h` and the following implementation files:
+- `position_units_word.cc`
+- `position_units_sentence.cc`
+- `position_units_line.cc`
+- `position_units_paragraph.cc`
+- `position_units.cc` (document boundary + editable content; small)
 
-This CL establishes the new home for all `Position`-based navigation. No
-`VisiblePosition` types appear anywhere in these two files.
+This mirrors the existing `visible_units_word.cc` / `visible_units_sentence.cc` /
+`visible_units_line.cc` / `visible_units_paragraph.cc` split. One umbrella header,
+per-unit implementation files. No `VisiblePosition` type appears anywhere in any of
+these files.
 
 **Step 1 — Relocate existing `Position` overloads from `visible_units.h`:**
 
-Move the declarations and definitions of the following from `visible_units.h` /
-`visible_units.cc` into `visible_units_position.h` / `visible_units_position.cc`,
-and remove them from the originals:
+Move declarations and definitions out of `visible_units.h` / their originating
+`visible_units_*.cc` files into `position_units.h` / the corresponding
+`position_units_*.cc`, and remove them from the originals:
 
-- `StartOfWordPosition(const Position&)`
-- `EndOfWordPosition(const Position&)`
-- `StartOfLine(const PositionWithAffinity&)` → `PositionWithAffinity`
-- `EndOfLine(const PositionWithAffinity&)` → `PositionWithAffinity`
-- `InSameLine(const PositionWithAffinity&, const PositionWithAffinity&)`
-- `StartOfDocument(const Position&)` → `Position`
+| Function | From | To |
+|---|---|---|
+| `StartOfWordPosition`, `EndOfWordPosition`, `MiddleOfWordPosition`, `PreviousWordPosition`, `NextWordPosition` (all `Position`/`PositionInFlatTree` overloads) | `visible_units_word.cc` | `position_units_word.cc` |
+| `StartOfSentencePosition`, `EndOfSentence(Position)`, `EndOfSentence(PositionInFlatTree)`, `PreviousSentencePosition`, `NextSentencePosition`, `ExpandEndToSentenceBoundary`, `ExpandRangeToSentenceBoundary` | `visible_units_sentence.cc` | `position_units_sentence.cc` |
+| `StartOfLine(PositionWithAffinity)`, `StartOfLine(PositionInFlatTreeWithAffinity)`, `EndOfLine(PositionWithAffinity)`, `EndOfLine(PositionInFlatTreeWithAffinity)`, `InSameLine(PositionWithAffinity, ...)`, `InSameLine(PositionInFlatTreeWithAffinity, ...)` | `visible_units_line.cc` | `position_units_line.cc` |
+| `StartOfDocument(Position)`, `StartOfDocument(PositionInFlatTree)` | `visible_units.cc` | `position_units.cc` |
+| `StartOfEditableContent`, `EndOfEditableContent` | `visible_units.cc` | `position_units.cc` |
 
-Update every file that included `visible_units.h` for these functions to include
-`visible_units_position.h` instead (or in addition, if they also use VP functions).
+Update every file that included `visible_units.h` solely for these functions to
+include `position_units.h` instead (or in addition if they still use VP functions).
 
-**Step 2 — Add new trivial `Position` overloads in `visible_units_position.cc`:**
+**Step 2 — Add new trivial `Position` overloads:**
+
+Add to `position_units_paragraph.cc` (declarations in `position_units.h`):
 
 ```cpp
 Position StartOfParagraph(const Position&,
@@ -83,15 +93,20 @@ bool IsEndOfParagraph(const Position&,
 bool InSameParagraph(const Position&, const Position&,
                      EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
 Position StartOfNextParagraph(const Position&);
+```
+
+Add to `position_units.cc`:
+
+```cpp
 Position EndOfDocument(const Position&);
 bool IsStartOfDocument(const Position&);
 bool IsEndOfDocument(const Position&);
 ```
 
-**Implementation:**
+**Implementation for paragraph overloads:**
 `StartOfParagraphAlgorithm<EditingStrategy>` and `EndOfParagraphAlgorithm<EditingStrategy>`
 already exist in `visible_units_paragraph.cc` taking `PositionTemplate<Strategy>`.
-Call them directly:
+Call them directly from `position_units_paragraph.cc`:
 
 ```cpp
 Position StartOfParagraph(const Position& pos,
@@ -107,11 +122,12 @@ bool IsStartOfParagraph(const Position& pos,
 Apply the same pattern for `EndOfParagraph`, `IsEndOfParagraph`, `InSameParagraph`,
 `StartOfNextParagraph`.
 
+**Implementation for document overloads (in `position_units.cc`):**
 `EndOfDocument(Position)`: `return Position::LastPositionInNode(*pos.GetDocument());`
 `IsStartOfDocument(Position)`: `return pos == StartOfDocument(pos);`
 `IsEndOfDocument(Position)`: `return pos == EndOfDocument(pos);`
 
-No `CreateVisiblePosition` anywhere.
+No `CreateVisiblePosition` anywhere in any `position_units_*.cc`.
 
 **Verification:**
 ```
@@ -123,14 +139,15 @@ autoninja -C out/Default blink_unittests
 
 ### CL 1-B — Non-trivial overloads
 
-**Files:** `visible_units_position.cc`, `visible_units_position.h`
-(do NOT add to `visible_units.cc` / `visible_units.h`)
+**Files:** `position_units.h` (declarations), `position_units_line.cc` for line
+functions, `position_units.cc` for traversal and character.
+Do NOT add to `visible_units.cc` / `visible_units.h`.
 
 **Functions to add:**
 
 ```cpp
 // Do NOT change existing VP-returning signatures in visible_units.h.
-// Add new Position-returning overloads in visible_units_position.h only.
+// Add new Position-returning overloads in position_units.h only.
 Position PreviousPositionOf(const Position&,
                             EditingBoundaryCrossingRule = kCanCrossEditingBoundary);
 Position NextPositionOf(const Position&,
@@ -174,7 +191,7 @@ character — no VP construction.
 
 **Implementation for `IsStartOfLine` / `IsEndOfLine`:**
 `StartOfLine(PositionWithAffinity)` and `EndOfLine(PositionWithAffinity)` already
-exist (relocated from `visible_units.h` in CL 1-A). Delegate to them:
+exist (relocated from `visible_units.h` to `position_units_line.cc` in CL 1-A). Delegate to them in `position_units_line.cc`:
 
 ```cpp
 bool IsStartOfLine(const PositionWithAffinity& pos) {
@@ -246,10 +263,10 @@ autoninja -C out/Default blink_unittests
 ./out/Default/blink_unittests --gtest_filter="*Paragraph*:*Document*:*Block*:*Edit*:*Line*"
 ```
 
-**Include rule after Phase 1:** Command files (and any other callers) must include
-`visible_units_position.h` for `Position`-typed queries and `visible_units.h` only
-when VP-returning functions are still needed. A file that has completed VP cleanup
-should include `visible_units_position.h` only and have no `visible_units.h` include.
+**Include rule after Phase 1:** Command files must include `position_units.h` for
+`Position`-typed queries and `visible_units.h` only when VP-returning functions are
+still needed. A file that has completed VP cleanup should include `position_units.h`
+only and have no `visible_units.h` include.
 
 ---
 
@@ -594,3 +611,229 @@ grep -r "visible_position.h" \
   third_party/blink/renderer/core/editing/commands/*.cc
 ```
 Must return no results (or only files with documented legitimate boundary VP).
+
+---
+
+## CL 1-A CORRECTION — Align existing patchset with vision
+
+This prompt is for an agent picking up CL
+`https://chromium-review.googlesource.com/c/chromium/src/+/7705945` (currently at
+patchset 5) and bringing it into alignment with the target design.
+
+### What patchset 5 did (correct parts — keep these)
+
+- Created `position_units.h` with declarations for word, line, paragraph, document
+  functions. Keep this file; it is the right umbrella header.
+- Created `position_units_test.cc` with basic tests. Keep and extend below.
+- Removed `StartOfWordPosition(Position)`, `EndOfWordPosition(Position)` declarations
+  from `visible_units.h`. Correct — do not revert.
+- Removed `StartOfLine(PositionWithAffinity)`, `EndOfLine(PositionWithAffinity)`,
+  `InSameLine(PositionWithAffinity, ...)` declarations from `visible_units.h`.
+  Correct — do not revert.
+- Removed `StartOfDocument(Position)` declaration from `visible_units.h`. Correct.
+- Added paragraph overloads (`StartOfParagraph`, `EndOfParagraph`,
+  `IsStartOfParagraph`, `IsEndOfParagraph`, `InSameParagraph`,
+  `StartOfNextParagraph`) with `const Position&` signatures. Correct.
+- Added `EndOfDocument`, `IsStartOfDocument`, `IsEndOfDocument` with `const
+  Position&`. Correct.
+
+### What patchset 5 did wrong — fix all of these
+
+**Problem 1: Single monolithic `position_units.cc` instead of per-unit split.**
+
+The target structure mirrors `visible_units_*.cc`:
+
+```
+position_units.h              <- umbrella header (already exists, keep)
+position_units_word.cc        <- word functions (NEW — create)
+position_units_sentence.cc    <- sentence functions (NEW — create)
+position_units_line.cc        <- line functions (NEW — create)
+position_units_paragraph.cc   <- paragraph functions (NEW — create)
+position_units.cc             <- document + editable content only (already exists, trim)
+```
+
+Move the implementations out of `position_units.cc` and
+`visible_units_paragraph.cc` into the per-unit files as described below.
+
+**Problem 2: Word functions implemented via flat-tree round-trip in `position_units.cc`.**
+
+Patchset 5 implemented `StartOfWordPosition(Position)` and `EndOfWordPosition(Position)`
+by calling the `PositionInFlatTree` overload and converting back with
+`ToPositionInDOMTree()`. This is wrong — it routes through the flat tree
+unnecessarily.
+
+The correct implementation calls the DOM-tree algorithm template directly. Look for
+`StartOfWordPositionAlgorithm<EditingStrategy>` and
+`EndOfWordPositionAlgorithm<EditingStrategy>` in `visible_units_word.cc`. If the
+algorithm is templated, call `<EditingStrategy>` directly from
+`position_units_word.cc`. If it is not templated, replicate the same pattern used
+for the paragraph functions (call the internal `*Algorithm<EditingStrategy>`).
+
+The definitions must live in `position_units_word.cc`, not `position_units.cc`.
+
+**Problem 3: Word functions moved out of `visible_units_word.cc` but the
+`PositionInFlatTree` overloads were left behind.**
+
+The `PositionInFlatTree` overloads of `StartOfWordPosition`, `EndOfWordPosition`,
+`MiddleOfWordPosition`, `PreviousWordPosition`, `NextWordPosition` must also be
+relocated to `position_units_word.cc`. Currently they remain in
+`visible_units_word.cc`. Move them. Their declarations move to `position_units.h`.
+Remove them from `visible_units.h` and `visible_units_word.cc`.
+
+**Problem 4: `MiddleOfWordPosition`, `PreviousWordPosition`, `NextWordPosition` are
+missing entirely.**
+
+Patchset 5 only relocated `StartOfWordPosition` and `EndOfWordPosition`. The
+following must also be relocated to `position_units_word.cc` / declared in
+`position_units.h`:
+
+```cpp
+Position MiddleOfWordPosition(const Position&, const Position&);
+PositionInFlatTree MiddleOfWordPosition(const PositionInFlatTree&,
+                                        const PositionInFlatTree&);
+PositionWithAffinity PreviousWordPosition(const Position&);
+PositionInFlatTreeWithAffinity PreviousWordPosition(const PositionInFlatTree&);
+PositionWithAffinity NextWordPosition(const Position&,
+    PlatformWordBehavior = PlatformWordBehavior::kWordDontSkipSpaces);
+PositionInFlatTreeWithAffinity NextWordPosition(const PositionInFlatTree&,
+    PlatformWordBehavior = PlatformWordBehavior::kWordDontSkipSpaces);
+```
+
+Move definitions from `visible_units_word.cc` to `position_units_word.cc`.
+Remove declarations from `visible_units.h`, add to `position_units.h`.
+
+**Problem 5: `WordSide` enum was removed from `visible_units.h` but must be
+declared in `position_units.h`.**
+
+`WordSide` is needed by `StartOfWordPosition` / `EndOfWordPosition` callers. Move
+the enum declaration into `position_units.h` (it is already gone from
+`visible_units.h`, so no double-declaration). Also move `PlatformWordBehavior` and
+`SentenceTrailingSpaceBehavior` enums to `position_units.h` since they are
+parameters of functions moving there.
+
+**Problem 6: Sentence functions are missing entirely.**
+
+The following must be relocated to `position_units_sentence.cc` / declared in
+`position_units.h`:
+
+```cpp
+Position StartOfSentencePosition(const Position&);
+PositionInFlatTree StartOfSentencePosition(const PositionInFlatTree&);
+PositionWithAffinity EndOfSentence(const Position&,
+    SentenceTrailingSpaceBehavior = SentenceTrailingSpaceBehavior::kIncludeSpace);
+PositionInFlatTreeWithAffinity EndOfSentence(const PositionInFlatTree&,
+    SentenceTrailingSpaceBehavior = SentenceTrailingSpaceBehavior::kIncludeSpace);
+PositionInFlatTree PreviousSentencePosition(const PositionInFlatTree&);
+PositionInFlatTree NextSentencePosition(const PositionInFlatTree&);
+EphemeralRange ExpandEndToSentenceBoundary(const EphemeralRange&);
+EphemeralRange ExpandRangeToSentenceBoundary(const EphemeralRange&);
+```
+
+Note: `EndOfSentence(const VisiblePosition&)` and
+`EndOfSentence(const VisiblePositionInFlatTree&)` stay in `visible_units.h` —
+do not touch those.
+
+Move definitions from `visible_units_sentence.cc` to `position_units_sentence.cc`.
+Remove declarations from `visible_units.h`, add to `position_units.h`.
+
+**Problem 7: Line `PositionWithAffinity` functions were removed from
+`visible_units.h` but their definitions were NOT moved out of
+`visible_units_line.cc`.**
+
+Patchset 5 removed declarations from `visible_units.h` (correct) but left the
+definitions sitting in `visible_units_line.cc` and merely added an include of
+`position_units.h` there. The definitions must actually move:
+
+Move from `visible_units_line.cc` to `position_units_line.cc`:
+- `StartOfLine(const PositionWithAffinity&)`
+- `StartOfLine(const PositionInFlatTreeWithAffinity&)`
+- `EndOfLine(const PositionWithAffinity&)`
+- `EndOfLine(const PositionInFlatTreeWithAffinity&)`
+- `InSameLine(const PositionWithAffinity&, const PositionWithAffinity&)`
+- `InSameLine(const PositionInFlatTreeWithAffinity&, ...)`
+
+Create `position_units_line.cc` with these definitions. The `VisiblePosition`
+overloads of `StartOfLine`, `EndOfLine`, `InSameLine`, `IsStartOfLine`,
+`IsEndOfLine`, `LogicalStartOfLine`, `LogicalEndOfLine` stay in
+`visible_units_line.cc` — do not touch those.
+
+**Problem 8: `PositionInFlatTree` line overloads not declared in `position_units.h`.**
+
+Patchset 5 only declares the `PositionWithAffinity` (DOM-tree) line overloads in
+`position_units.h`. Add the `PositionInFlatTreeWithAffinity` counterparts too.
+
+**Problem 9: Paragraph overloads live in `visible_units_paragraph.cc`, not in a
+`position_units_paragraph.cc`.**
+
+Patchset 5 added the paragraph `Position` overloads directly inside
+`visible_units_paragraph.cc`. Move them to a new `position_units_paragraph.cc`.
+Their declarations stay in `position_units.h` (already correct).
+Remove the definitions from `visible_units_paragraph.cc`.
+
+`position_units_paragraph.cc` will include `visible_units_paragraph.cc`'s algorithm
+templates. Because those templates are in an anonymous namespace in
+`visible_units_paragraph.cc`, you will need to either:
+- Forward-declare them in a shared internal header, or
+- Move the algorithm template declarations (not definitions) to a non-anonymous
+  scope or a `_impl.h` file that `position_units_paragraph.cc` can include.
+Check how `visible_units_paragraph.cc` already exposes `StartOfParagraphAlgorithm`
+to test files before deciding the approach.
+
+**Problem 10: `StartOfDocument(PositionInFlatTree)` was not moved.**
+
+The `PositionInFlatTree` overload of `StartOfDocument` was left in
+`visible_units.cc`. Move it to `position_units.cc`. Remove from `visible_units.cc`
+and `visible_units.h`, add declaration to `position_units.h`.
+
+**Problem 11: `StartOfEditableContent` / `EndOfEditableContent` are missing.**
+
+These take `PositionInFlatTree` and live in `visible_units.cc`. Relocate to
+`position_units.cc`. Remove declarations from `visible_units.h`, add to
+`position_units.h`.
+
+### Build system
+
+Add all new `.cc` files to `build.gni` in the `editing_sources` list
+(alphabetically ordered). Each new file goes adjacent to its `visible_units_*`
+counterpart. Add test functions to `position_units_test.cc` for the newly relocated
+sentence and line functions (at minimum one test per unit).
+
+### Summary of files to create
+
+| File | Contents |
+|---|---|
+| `position_units_word.cc` | All `Position`/`PositionInFlatTree` word overloads |
+| `position_units_sentence.cc` | All `Position`/`PositionInFlatTree` sentence overloads |
+| `position_units_line.cc` | All `PositionWithAffinity`/`PositionInFlatTreeWithAffinity` line overloads |
+| `position_units_paragraph.cc` | All `Position` paragraph overloads (moved from `visible_units_paragraph.cc`) |
+
+### Summary of files to modify
+
+| File | Change |
+|---|---|
+| `position_units.h` | Add missing declarations: all flat-tree word overloads, sentence functions, flat-tree line overloads, `WordSide`/`PlatformWordBehavior`/`SentenceTrailingSpaceBehavior` enums |
+| `position_units.cc` | Remove word implementations; add `StartOfDocument(PositionInFlatTree)`, `StartOfEditableContent`, `EndOfEditableContent` |
+| `visible_units.h` | Remove remaining declarations for relocated sentence/flat-tree word functions |
+| `visible_units_word.cc` | Remove all `Position`/`PositionInFlatTree` overload definitions that moved to `position_units_word.cc` |
+| `visible_units_sentence.cc` | Remove all definitions that moved to `position_units_sentence.cc` |
+| `visible_units_line.cc` | Remove `PositionWithAffinity`/`PositionInFlatTreeWithAffinity` overload definitions that moved to `position_units_line.cc` |
+| `visible_units_paragraph.cc` | Remove paragraph `Position` overload definitions that moved to `position_units_paragraph.cc` |
+| `visible_units.cc` | Remove `StartOfDocument(PositionInFlatTree)`, `StartOfEditableContent`, `EndOfEditableContent` |
+| `build.gni` | Add `position_units_word.cc`, `position_units_sentence.cc`, `position_units_line.cc`, `position_units_paragraph.cc` |
+| `position_units_test.cc` | Add tests for sentence and line functions |
+
+### Hard constraints (same as universal rules)
+
+- No `VisiblePosition`, `CreateVisiblePosition`, `ToPositionInDOMTree` round-trips,
+  or `CanonicalPositionOf` anywhere in any `position_units_*.cc`.
+- All implementations call algorithm templates (`<EditingStrategy>`) directly.
+- No `visible_units.h` include in any `position_units_*.cc` (they call templates,
+  not the public API).
+
+### Verification
+
+```
+autoninja -C out/Default blink_unittests
+./out/Default/blink_unittests --gtest_filter="*Paragraph*:*Document*:*Word*:*Sentence*:*Line*:*Edit*"
+python3 third_party/blink/tools/run_web_tests.py editing/
+```

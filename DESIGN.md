@@ -166,9 +166,36 @@ block-structure helpers private to that file): `StartOfBlock`, `EndOfBlock`,
 
 ### Already in `visible_units.h` - relocate to `position_units.h`
 
-`StartOfWordPosition`, `EndOfWordPosition`, `StartOfLine(PositionWithAffinity)`,
-`EndOfLine(PositionWithAffinity)`, `InSameLine(PositionWithAffinity, PositionWithAffinity)`,
-`StartOfDocument(Position)`.
+These already take `Position` or `PositionWithAffinity` and return the same. They are
+moved in CL 1-A and removed from `visible_units.h`.
+
+**Word:** `StartOfWordPosition`, `EndOfWordPosition`, `MiddleOfWordPosition`,
+`PreviousWordPosition`, `NextWordPosition`.
+
+**Sentence:** `StartOfSentencePosition`, `EndOfSentence(const Position&)`,
+`PreviousSentencePosition`, `NextSentencePosition`, `ExpandEndToSentenceBoundary`,
+`ExpandRangeToSentenceBoundary`.
+
+**Line:** `StartOfLine(PositionWithAffinity)`, `EndOfLine(PositionWithAffinity)`,
+`InSameLine(PositionWithAffinity, PositionWithAffinity)`.
+
+**Document:** `StartOfDocument(Position)`.
+
+Note: `EndOfSentence(const VisiblePosition&)` stays in `visible_units.h` - it is a
+VP overload, not a `Position`-based one.
+
+### `PositionWithAffinity` ownership rule
+
+A function belongs in `position_units.h` if it answers a "where is the boundary of
+unit X?" question using DOM structure, regardless of whether it takes or returns
+`PositionWithAffinity`. `PositionWithAffinity` is just a `Position` with an affinity
+tag - it is not a layout type.
+
+A function stays in `visible_units.h` if it is a layout or hit-test utility that
+happens to use `PositionWithAffinity` as a carrier type (e.g.
+`AdjustForwardPositionToAvoidCrossingEditingBoundaries`,
+`PositionForContentsPointRespectingEditingBoundary`). These are tied to layout
+machinery, not navigation units.
 
 ### Implementation strategy
 
